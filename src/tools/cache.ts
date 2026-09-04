@@ -1,9 +1,7 @@
 import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { cfFetch, resolveZone } from "../cloudflare.js";
-import { textResult, requireConfirm } from "../util.js";
-
-const zoneParam = z.string().optional().describe("Zone name or ID; defaults to CF_ZONE.");
+import { cfFetch, resolveZone, seg } from "../cloudflare.js";
+import { textResult, requireConfirm, zoneParam } from "../util.js";
 
 export function registerCacheTools(server: McpServer): void {
   server.registerTool(
@@ -73,7 +71,7 @@ export function registerCacheTools(server: McpServer): void {
     },
     async ({ zone, setting }) => {
       const z_ = await resolveZone(zone);
-      const resp = await cfFetch(`/zones/${z_.id}/settings/${setting}`);
+      const resp = await cfFetch(`/zones/${z_.id}/settings/${seg(setting)}`);
       return textResult({ zone: z_.name, setting: resp.result });
     }
   );
@@ -119,7 +117,7 @@ export function registerCacheTools(server: McpServer): void {
       }
 
       const z_ = await resolveZone(zone);
-      const resp = await cfFetch(`/zones/${z_.id}/settings/${setting}`, {
+      const resp = await cfFetch(`/zones/${z_.id}/settings/${seg(setting)}`, {
         method: "PATCH",
         body: { value: parsed },
       });

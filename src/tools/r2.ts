@@ -1,12 +1,7 @@
 import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { cfFetch, resolveAccountId } from "../cloudflare.js";
-import { textResult, requireConfirm, jsonObject } from "../util.js";
-
-const accountParam = z
-  .string()
-  .optional()
-  .describe("Account ID. Defaults to CF_ACCOUNT_ID, else the first account the token can see.");
+import { cfFetch, resolveAccountId, seg } from "../cloudflare.js";
+import { textResult, requireConfirm, jsonObject, accountParam } from "../util.js";
 
 const bucketParam = z.string().describe("R2 bucket name");
 
@@ -34,7 +29,7 @@ export function registerR2Tools(server: McpServer): void {
     "cf_create_r2_bucket",
     {
       title: "Create an R2 bucket",
-      description: "Create a new R2 bucket.",
+      description: "Create a new R2 bucket. Requires confirm=true.",
       inputSchema: {
         account: accountParam,
         name: bucketParam,
@@ -43,9 +38,11 @@ export function registerR2Tools(server: McpServer): void {
           .optional()
           .describe("Preferred storage region hint"),
         storage_class: z.enum(["Standard", "InfrequentAccess"]).optional().default("Standard"),
+        confirm: z.boolean().describe("Must be true — this creates persistent object storage"),
       },
     },
-    async ({ account, name, location_hint, storage_class }) => {
+    async ({ account, name, location_hint, storage_class, confirm }) => {
+      requireConfirm(confirm, `create R2 bucket "${name}"`);
       const acct = await resolveAccountId(account);
       const resp = await cfFetch(`/accounts/${acct}/r2/buckets`, {
         method: "POST",
@@ -64,7 +61,7 @@ export function registerR2Tools(server: McpServer): void {
     },
     async ({ account, bucket }) => {
       const acct = await resolveAccountId(account);
-      const resp = await cfFetch(`/accounts/${acct}/r2/buckets/${bucket}`);
+      const resp = await cfFetch(`/accounts/${acct}/r2/buckets/${seg(bucket)}`);
       return textResult(resp.result);
     }
   );
@@ -84,7 +81,7 @@ export function registerR2Tools(server: McpServer): void {
     async ({ account, bucket, confirm }) => {
       requireConfirm(confirm, `delete R2 bucket "${bucket}"`);
       const acct = await resolveAccountId(account);
-      await cfFetch(`/accounts/${acct}/r2/buckets/${bucket}`, { method: "DELETE" });
+      await cfFetch(`/accounts/${acct}/r2/buckets/${seg(bucket)}`, { method: "DELETE" });
       return textResult({ deleted: bucket });
     }
   );
@@ -98,7 +95,7 @@ export function registerR2Tools(server: McpServer): void {
     },
     async ({ account, bucket }) => {
       const acct = await resolveAccountId(account);
-      const resp = await cfFetch(`/accounts/${acct}/r2/buckets/${bucket}/cors`);
+      const resp = await cfFetch(`/accounts/${acct}/r2/buckets/${seg(bucket)}/cors`);
       return textResult({ bucket, cors: resp.result });
     }
   );
@@ -120,7 +117,7 @@ export function registerR2Tools(server: McpServer): void {
     async ({ account, bucket, rules, confirm }) => {
       requireConfirm(confirm, `replace CORS policy on R2 bucket "${bucket}"`);
       const acct = await resolveAccountId(account);
-      const resp = await cfFetch(`/accounts/${acct}/r2/buckets/${bucket}/cors`, {
+      const resp = await cfFetch(`/accounts/${acct}/r2/buckets/${seg(bucket)}/cors`, {
         method: "PUT",
         body: { rules },
       });
@@ -137,7 +134,7 @@ export function registerR2Tools(server: McpServer): void {
     },
     async ({ account, bucket }) => {
       const acct = await resolveAccountId(account);
-      const resp = await cfFetch(`/accounts/${acct}/r2/buckets/${bucket}/lifecycle`);
+      const resp = await cfFetch(`/accounts/${acct}/r2/buckets/${seg(bucket)}/lifecycle`);
       return textResult({ bucket, lifecycle: resp.result });
     }
   );
@@ -157,7 +154,7 @@ export function registerR2Tools(server: McpServer): void {
     async ({ account, bucket, rules, confirm }) => {
       requireConfirm(confirm, `replace lifecycle rules on R2 bucket "${bucket}"`);
       const acct = await resolveAccountId(account);
-      const resp = await cfFetch(`/accounts/${acct}/r2/buckets/${bucket}/lifecycle`, {
+      const resp = await cfFetch(`/accounts/${acct}/r2/buckets/${seg(bucket)}/lifecycle`, {
         method: "PUT",
         body: { rules },
       });
@@ -174,7 +171,7 @@ export function registerR2Tools(server: McpServer): void {
     },
     async ({ account, bucket }) => {
       const acct = await resolveAccountId(account);
-      const resp = await cfFetch(`/accounts/${acct}/r2/buckets/${bucket}/domains/managed`);
+      const resp = await cfFetch(`/accounts/${acct}/r2/buckets/${seg(bucket)}/domains/managed`);
       return textResult({ bucket, managedDomain: resp.result });
     }
   );
@@ -195,7 +192,7 @@ export function registerR2Tools(server: McpServer): void {
     async ({ account, bucket, enabled, confirm }) => {
       requireConfirm(confirm, `set public r2.dev access on "${bucket}" to ${enabled}`);
       const acct = await resolveAccountId(account);
-      const resp = await cfFetch(`/accounts/${acct}/r2/buckets/${bucket}/domains/managed`, {
+      const resp = await cfFetch(`/accounts/${acct}/r2/buckets/${seg(bucket)}/domains/managed`, {
         method: "PUT",
         body: { enabled },
       });
@@ -212,7 +209,7 @@ export function registerR2Tools(server: McpServer): void {
     },
     async ({ account, bucket }) => {
       const acct = await resolveAccountId(account);
-      const resp = await cfFetch(`/accounts/${acct}/r2/buckets/${bucket}/domains/custom`);
+      const resp = await cfFetch(`/accounts/${acct}/r2/buckets/${seg(bucket)}/domains/custom`);
       return textResult({ bucket, domains: resp.result });
     }
   );
@@ -235,7 +232,7 @@ export function registerR2Tools(server: McpServer): void {
     async ({ account, bucket, domain, zone_id, enabled, min_tls, confirm }) => {
       requireConfirm(confirm, `connect domain "${domain}" to R2 bucket "${bucket}"`);
       const acct = await resolveAccountId(account);
-      const resp = await cfFetch(`/accounts/${acct}/r2/buckets/${bucket}/domains/custom`, {
+      const resp = await cfFetch(`/accounts/${acct}/r2/buckets/${seg(bucket)}/domains/custom`, {
         method: "POST",
         body: { domain, zoneId: zone_id, enabled, minTLS: min_tls },
       });
@@ -258,7 +255,9 @@ export function registerR2Tools(server: McpServer): void {
     async ({ account, bucket, domain, confirm }) => {
       requireConfirm(confirm, `disconnect domain "${domain}" from R2 bucket "${bucket}"`);
       const acct = await resolveAccountId(account);
-      await cfFetch(`/accounts/${acct}/r2/buckets/${bucket}/domains/custom/${domain}`, { method: "DELETE" });
+      await cfFetch(`/accounts/${acct}/r2/buckets/${seg(bucket)}/domains/custom/${seg(domain)}`, {
+        method: "DELETE",
+      });
       return textResult({ bucket, removedDomain: domain });
     }
   );
@@ -272,7 +271,7 @@ export function registerR2Tools(server: McpServer): void {
     },
     async ({ account, bucket }) => {
       const acct = await resolveAccountId(account);
-      const resp = await cfFetch(`/accounts/${acct}/event_notifications/r2/${bucket}/configuration`);
+      const resp = await cfFetch(`/accounts/${acct}/event_notifications/r2/${seg(bucket)}/configuration`);
       return textResult({ bucket, notifications: resp.result });
     }
   );
@@ -298,7 +297,7 @@ export function registerR2Tools(server: McpServer): void {
       requireConfirm(confirm, `set event notifications from R2 bucket "${bucket}" to queue ${queue_id}`);
       const acct = await resolveAccountId(account);
       const resp = await cfFetch(
-        `/accounts/${acct}/event_notifications/r2/${bucket}/configuration/queues/${queue_id}`,
+        `/accounts/${acct}/event_notifications/r2/${seg(bucket)}/configuration/queues/${seg(queue_id)}`,
         { method: "PUT", body: { rules } }
       );
       return textResult({ bucket, queue: queue_id, result: resp.result });

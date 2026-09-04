@@ -1,7 +1,7 @@
 import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { cfFetch, resolveZone, toFqdn } from "../cloudflare.js";
-import { textResult, requireConfirm, jsonObject, compact } from "../util.js";
+import { cfFetch, resolveZone, toFqdn, seg } from "../cloudflare.js";
+import { textResult, requireConfirm, jsonObject, compact, zoneParam } from "../util.js";
 
 type DnsRecord = {
   id: string;
@@ -15,11 +15,6 @@ type DnsRecord = {
   comment?: string | null;
   tags?: string[];
 };
-
-const zoneParam = z
-  .string()
-  .optional()
-  .describe("Zone name or zone ID. Defaults to CF_ZONE from server config if omitted.");
 
 const recordTypeParam = z
   .string()
@@ -51,7 +46,10 @@ export function registerDnsTools(server: McpServer): void {
       inputSchema: {
         zone: zoneParam,
         type: z.string().optional().describe("Filter by record type, e.g. A"),
-        name: z.string().optional().describe("Filter by exact record name/FQDN"),
+        name: z
+          .string()
+          .optional()
+          .describe("Filter by record name — short name, '@' for the zone apex, or a full FQDN"),
         search: z.string().optional().describe("Filter by substring match on name or content"),
         page: z.number().int().positive().optional().default(1),
         per_page: z.number().int().positive().max(100).optional().default(50),
@@ -59,8 +57,12 @@ export function registerDnsTools(server: McpServer): void {
     },
     async ({ zone, type, name, search, page, per_page }) => {
       const z_ = await resolveZone(zone);
+      // Every other DNS tool normalizes `name` through toFqdn before querying;
+      // this one previously didn't, so `name: "www"` or `"@"` silently matched
+      // nothing even though the record existed.
+      const fqdnName = name ? toFqdn(name, z_.name) : undefined;
       const resp = await cfFetch<DnsRecord[]>(`/zones/${z_.id}/dns_records`, {
-        query: { type, name, search, page, per_page },
+        query: { type, name: fqdnName, search, page, per_page },
       });
       return textResult({ zone: z_.name, result_info: resp.result_info, records: resp.result });
     }
@@ -82,7 +84,7 @@ export function registerDnsTools(server: McpServer): void {
       const z_ = await resolveZone(zone);
       let record: DnsRecord;
       if (id) {
-        record = (await cfFetch<DnsRecord>(`/zones/${z_.id}/dns_records/${id}`)).result;
+        record = (await cfFetch<DnsRecord>(`/zones/${z_.id}/dns_records/${seg(id)}`)).result;
       } else if (type && name) {
         record = await findRecordByTypeName(z_.id, type, toFqdn(name, z_.name));
       } else {
@@ -97,7 +99,7 @@ export function registerDnsTools(server: McpServer): void {
     {
       title: "Add a Cloudflare DNS record",
       description:
-        "Create a new DNS record in a zone. For simple types (A, AAAA, CNAME, TXT, NS, PTR, MX) use 'content' (+ 'priority' for MX). For types that need structured data (SRV, CAA, etc.) pass 'data' matching the Cloudflare API shape for that type.",
+        "Create a new DNS record in a zone. For simple types (A, AAAA, CNAME, TXT, NS, PTR, MX) use 'content' (+ 'priority' for MX). For types that need structured data (SRV, CAA, etc.) pass 'data' matching the Cloudflare API shape for that type. Requires confirm=true.",
       inputSchema: {
         zone: zoneParam,
         type: recordTypeParam,
@@ -109,9 +111,11 @@ export function registerDnsTools(server: McpServer): void {
         priority: z.number().int().optional().describe("Priority, used by MX/SRV records"),
         comment: z.string().optional(),
         tags: z.array(z.string()).optional(),
+        confirm: z.boolean().describe("Must be true — this changes live DNS"),
       },
     },
-    async ({ zone, type, name, content, data, ttl, proxied, priority, comment, tags }) => {
+    async ({ zone, type, name, content, data, ttl, proxied, priority, comment, tags, confirm }) => {
+      requireConfirm(confirm, `create ${type} DNS record "${name}"`);
       const z_ = await resolveZone(zone);
       const fqdn = toFqdn(name, z_.name);
       if (!content && !data) {
@@ -159,7 +163,7 @@ export function registerDnsTools(server: McpServer): void {
       if (Object.keys(patch).length === 0) {
         throw new Error("Provide at least one field to update (content, data, ttl, proxied, priority, comment, tags).");
       }
-      const resp = await cfFetch<DnsRecord>(`/zones/${z_.id}/dns_records/${recordId}`, {
+      const resp = await cfFetch<DnsRecord>(`/zones/${z_.id}/dns_records/${seg(recordId)}`, {
         method: "PATCH",
         body: patch,
       });
@@ -193,7 +197,7 @@ export function registerDnsTools(server: McpServer): void {
         recordId = found.id;
         describedAs = `${type} ${fqdn}`;
       }
-      await cfFetch(`/zones/${z_.id}/dns_records/${recordId}`, { method: "DELETE" });
+      await cfFetch(`/zones/${z_.id}/dns_records/${seg(recordId)}`, { method: "DELETE" });
       return textResult({ zone: z_.name, deleted: recordId, describedAs });
     }
   );

@@ -1,9 +1,22 @@
 import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { cfFetch, resolveZone, CF_API_TOKEN, GRAPHQL_ENDPOINT } from "../cloudflare.js";
-import { textResult, requireConfirm, compact, jsonObject } from "../util.js";
+import { textResult, requireConfirm, compact, jsonObject, zoneParam } from "../util.js";
 
-const zoneParam = z.string().optional().describe("Zone name or ID; defaults to CF_ZONE.");
+/**
+ * Logpush jobs echo `destination_conf` back verbatim, which for r2://, s3://,
+ * or an HTTP destination with query-string auth embeds an access key id,
+ * secret, or bearer token directly in the string. Redacting before it enters
+ * the conversation avoids putting live credentials into chat transcripts and
+ * client-side logs.
+ */
+function redactJob(job: unknown): unknown {
+  if (!job || typeof job !== "object") return job;
+  const { destination_conf, ...rest } = job as Record<string, unknown>;
+  return destination_conf === undefined
+    ? rest
+    : { ...rest, destination_conf: "[redacted — use cf_list_logpush_jobs' job_id to reference this job]" };
+}
 
 export function registerAnalyticsTools(server: McpServer): void {
   server.registerTool(
@@ -92,8 +105,8 @@ export function registerAnalyticsTools(server: McpServer): void {
     },
     async ({ zone }) => {
       const z_ = await resolveZone(zone);
-      const resp = await cfFetch(`/zones/${z_.id}/logpush/jobs`);
-      return textResult({ zone: z_.name, jobs: resp.result });
+      const resp = await cfFetch<Array<Record<string, unknown>>>(`/zones/${z_.id}/logpush/jobs`);
+      return textResult({ zone: z_.name, jobs: resp.result.map(redactJob) });
     }
   );
 
@@ -122,7 +135,7 @@ export function registerAnalyticsTools(server: McpServer): void {
         method: "POST",
         body: compact({ name, dataset, destination_conf, logpull_options, enabled }),
       });
-      return textResult({ zone: z_.name, job: resp.result });
+      return textResult({ zone: z_.name, job: redactJob(resp.result) });
     }
   );
 

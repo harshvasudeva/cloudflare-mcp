@@ -1,9 +1,8 @@
 import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { cfFetch, cfFetchRaw, cfFetchAll, resolveAccountId, makeNameResolver } from "../cloudflare.js";
-import { textResult, requireConfirm, jsonObject } from "../util.js";
+import { textResult, requireConfirm, jsonObject, accountParam } from "../util.js";
 
-const accountParam = z.string().optional().describe("Account ID; defaults to CF_ACCOUNT_ID.");
 const nsParam = z.string().describe("KV namespace — either its ID or its title/name");
 
 type KvNamespace = { id: string; title: string };
@@ -35,10 +34,15 @@ export function registerKvTools(server: McpServer): void {
     "cf_create_kv_namespace",
     {
       title: "Create a KV namespace",
-      description: "Create a new Workers KV namespace.",
-      inputSchema: { account: accountParam, title: z.string().describe("Namespace title") },
+      description: "Create a new Workers KV namespace. Requires confirm=true.",
+      inputSchema: {
+        account: accountParam,
+        title: z.string().describe("Namespace title"),
+        confirm: z.boolean().describe("Must be true — this creates persistent storage"),
+      },
     },
-    async ({ account, title }) => {
+    async ({ account, title, confirm }) => {
+      requireConfirm(confirm, `create KV namespace "${title}"`);
       const acct = await resolveAccountId(account);
       const resp = await cfFetch<KvNamespace>(`/accounts/${acct}/storage/kv/namespaces`, {
         method: "POST",
@@ -53,10 +57,16 @@ export function registerKvTools(server: McpServer): void {
     "cf_rename_kv_namespace",
     {
       title: "Rename a KV namespace",
-      description: "Change the title of an existing KV namespace.",
-      inputSchema: { account: accountParam, namespace: nsParam, title: z.string().describe("New title") },
+      description: "Change the title of an existing KV namespace. Requires confirm=true.",
+      inputSchema: {
+        account: accountParam,
+        namespace: nsParam,
+        title: z.string().describe("New title"),
+        confirm: z.boolean().describe("Must be true — this changes a live namespace"),
+      },
     },
-    async ({ account, namespace, title }) => {
+    async ({ account, namespace, title, confirm }) => {
+      requireConfirm(confirm, `rename KV namespace "${namespace}" to "${title}"`);
       const acct = await resolveAccountId(account);
       const nsId = await nsResolver.resolve(acct, namespace);
       await cfFetch(`/accounts/${acct}/storage/kv/namespaces/${nsId}`, { method: "PUT", body: { title } });
@@ -115,7 +125,8 @@ export function registerKvTools(server: McpServer): void {
     "cf_get_kv_value",
     {
       title: "Read a KV value",
-      description: "Read the value stored at a key in a KV namespace.",
+      description:
+        "Read the value stored at a key in a KV namespace. base64:true means the value is binary, base64-encoded.",
       inputSchema: { account: accountParam, namespace: nsParam, key: z.string() },
     },
     async ({ account, namespace, key }) => {
@@ -124,7 +135,7 @@ export function registerKvTools(server: McpServer): void {
       const value = await cfFetchRaw(
         `/accounts/${acct}/storage/kv/namespaces/${nsId}/values/${encodeURIComponent(key)}`
       );
-      return textResult({ namespace, key, value });
+      return textResult({ namespace, key, ...value });
     }
   );
 

@@ -1,9 +1,8 @@
 import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { cfFetch, cfFetchAll, resolveAccountId, makeNameResolver } from "../cloudflare.js";
-import { textResult, requireConfirm } from "../util.js";
+import { textResult, requireConfirm, accountParam } from "../util.js";
 
-const accountParam = z.string().optional().describe("Account ID; defaults to CF_ACCOUNT_ID.");
 const dbParam = z.string().describe("D1 database — either its UUID or its name");
 
 type D1Database = { uuid: string; name: string };
@@ -55,14 +54,16 @@ export function registerD1Tools(server: McpServer): void {
     "cf_create_d1_database",
     {
       title: "Create a D1 database",
-      description: "Create a new D1 SQL database.",
+      description: "Create a new D1 SQL database. Requires confirm=true.",
       inputSchema: {
         account: accountParam,
         name: z.string().describe("Database name"),
         primary_location_hint: z.string().optional().describe("Region hint, e.g. wnam, weur, apac"),
+        confirm: z.boolean().describe("Must be true — this creates persistent storage"),
       },
     },
-    async ({ account, name, primary_location_hint }) => {
+    async ({ account, name, primary_location_hint, confirm }) => {
+      requireConfirm(confirm, `create D1 database "${name}"`);
       const acct = await resolveAccountId(account);
       const resp = await cfFetch<D1Database>(`/accounts/${acct}/d1/database`, {
         method: "POST",

@@ -1,6 +1,6 @@
 import { z } from "zod";
-import { readFileSync, writeFileSync } from "node:fs";
-import { basename } from "node:path";
+import { createWriteStream, readFileSync } from "node:fs";
+import { pipeline } from "node:stream/promises";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import {
   ListObjectsV2Command,
@@ -17,6 +17,8 @@ import { textResult, requireConfirm } from "../util.js";
 
 const accountParam = z.string().optional().describe("Account ID; defaults to CF_ACCOUNT_ID.");
 const bucketParam = z.string().describe("R2 bucket name");
+const MAX_INLINE_TEXT_BYTES = 1_000_000;
+const DELETE_OBJECTS_BATCH_SIZE = 1_000;
 
 /** Heuristic: treat well-known text types as inline-returnable, everything else as binary. */
 function isTextual(contentType: string | undefined, key: string): boolean {
@@ -74,8 +76,8 @@ export function registerR2ObjectTools(server: McpServer): void {
     {
       title: "Download an R2 object",
       description:
-        "Fetch an object from R2. Text-like files are returned inline; binary files are written to a local path " +
-        "(pass save_to, or one is derived from the key) and the path is returned.",
+        "Fetch an object from R2. Small text-like files are returned inline. Pass save_to for binary or large files; " +
+        "the object then streams directly to that explicit local path.",
       inputSchema: {
         account: accountParam,
         bucket: bucketParam,
@@ -86,26 +88,44 @@ export function registerR2ObjectTools(server: McpServer): void {
     async ({ account, bucket, key, save_to }) => {
       const { client } = await getR2Client(bucket, "object-read-only", account);
       const out = await client.send(new GetObjectCommand({ Bucket: bucket, Key: key }));
-      const bytes = Buffer.from(await out.Body!.transformToByteArray());
+      if (!out.Body) throw new Error(`R2 returned no body for object "${key}".`);
 
-      if (!save_to && isTextual(out.ContentType, key)) {
+      if (save_to) {
+        // The AWS SDK exposes a Node Readable here. Streaming prevents a large
+        // R2 download from being materialized (and copied) in MCP's heap.
+        await pipeline(out.Body as NodeJS.ReadableStream, createWriteStream(save_to));
         return textResult({
           bucket,
           key,
           contentType: out.ContentType,
-          size: bytes.length,
-          content: bytes.toString("utf8"),
+          size: out.ContentLength,
+          savedTo: save_to,
         });
       }
 
-      const path = save_to ?? (basename(key) || "r2-object.bin");
-      writeFileSync(path, bytes);
+      if (!isTextual(out.ContentType, key)) {
+        throw new Error(
+          `Object "${key}" appears binary. Pass an explicit 'save_to' path to download it safely.`
+        );
+      }
+      if ((out.ContentLength ?? 0) > MAX_INLINE_TEXT_BYTES) {
+        throw new Error(
+          `Object "${key}" is larger than ${MAX_INLINE_TEXT_BYTES} bytes. Pass an explicit 'save_to' path to stream it to disk.`
+        );
+      }
+
+      const bytes = Buffer.from(await out.Body.transformToByteArray());
+      if (bytes.length > MAX_INLINE_TEXT_BYTES) {
+        throw new Error(
+          `Object "${key}" is larger than ${MAX_INLINE_TEXT_BYTES} bytes. Pass an explicit 'save_to' path to stream it to disk.`
+        );
+      }
       return textResult({
         bucket,
         key,
         contentType: out.ContentType,
         size: bytes.length,
-        savedTo: path,
+        content: bytes.toString("utf8"),
       });
     }
   );
@@ -131,8 +151,8 @@ export function registerR2ObjectTools(server: McpServer): void {
     },
     async ({ account, bucket, key, content, file_path, content_type, cache_control, metadata, confirm }) => {
       requireConfirm(confirm, `upload object "${key}" to R2 bucket "${bucket}"`);
-      if (!content && !file_path) throw new Error("Provide either 'content' or 'file_path'.");
-      if (content && file_path) throw new Error("Provide only one of 'content' or 'file_path'.");
+      if (content === undefined && !file_path) throw new Error("Provide either 'content' or 'file_path'.");
+      if (content !== undefined && file_path) throw new Error("Provide only one of 'content' or 'file_path'.");
 
       const body = file_path ? readFileSync(file_path) : Buffer.from(content!, "utf8");
       const { client } = await getR2Client(bucket, "object-read-write", account);
@@ -172,12 +192,26 @@ export function registerR2ObjectTools(server: McpServer): void {
       if (targets.length === 1) {
         await client.send(new DeleteObjectCommand({ Bucket: bucket, Key: targets[0] }));
       } else {
-        await client.send(
-          new DeleteObjectsCommand({
-            Bucket: bucket,
-            Delete: { Objects: targets.map((k) => ({ Key: k })) },
-          })
-        );
+        const failed: Array<{ key?: string; code?: string; message?: string }> = [];
+        for (let start = 0; start < targets.length; start += DELETE_OBJECTS_BATCH_SIZE) {
+          const chunk = targets.slice(start, start + DELETE_OBJECTS_BATCH_SIZE);
+          const out = await client.send(
+            new DeleteObjectsCommand({
+              Bucket: bucket,
+              Delete: { Objects: chunk.map((k) => ({ Key: k })) },
+            })
+          );
+          for (const error of out.Errors ?? []) {
+            failed.push({ key: error.Key, code: error.Code, message: error.Message });
+          }
+        }
+        if (failed.length) {
+          throw new Error(
+            `R2 deleted some objects but ${failed.length} failed: ${failed
+              .map((error) => `${error.key ?? "unknown"} (${error.code ?? "unknown"}: ${error.message ?? "no message"})`)
+              .join("; ")}`
+          );
+        }
       }
       return textResult({ bucket, deleted: targets });
     }
@@ -223,17 +257,17 @@ export function registerR2ObjectTools(server: McpServer): void {
       // instead — works regardless of static keys or temp credentials.
       const { client: srcClient } = await getR2Client(src, "object-read-only", account);
       const got = await srcClient.send(new GetObjectCommand({ Bucket: src, Key: source_key }));
-      const bytes = Buffer.from(await got.Body!.transformToByteArray());
+      if (!got.Body) throw new Error(`R2 returned no body for source object "${source_key}".`);
 
       const { client: dstClient } = await getR2Client(bucket, "object-read-write", account);
       const put = await dstClient.send(
-        new PutObjectCommand({ Bucket: bucket, Key: key, Body: bytes, ContentType: got.ContentType })
+        new PutObjectCommand({ Bucket: bucket, Key: key, Body: got.Body, ContentType: got.ContentType })
       );
       return textResult({
         from: `${src}/${source_key}`,
         to: `${bucket}/${key}`,
         crossBucket: true,
-        size: bytes.length,
+        size: got.ContentLength,
         etag: put.ETag,
       });
     }

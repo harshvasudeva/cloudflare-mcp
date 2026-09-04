@@ -1,9 +1,8 @@
 import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { cfFetch, cfFetchAll, resolveAccountId, makeNameResolver } from "../cloudflare.js";
-import { textResult, requireConfirm, compact, jsonObject } from "../util.js";
+import { cfFetch, cfFetchAll, resolveAccountId, makeNameResolver, seg } from "../cloudflare.js";
+import { textResult, requireConfirm, compact, jsonObject, accountParam } from "../util.js";
 
-const accountParam = z.string().optional().describe("Account ID; defaults to CF_ACCOUNT_ID.");
 const queueParam = z.string().describe("Queue — either its ID or its name");
 
 type Queue = { queue_id: string; queue_name: string };
@@ -35,10 +34,15 @@ export function registerQueueTools(server: McpServer): void {
     "cf_create_queue",
     {
       title: "Create a Queue",
-      description: "Create a new Cloudflare Queue.",
-      inputSchema: { account: accountParam, name: z.string().describe("Queue name") },
+      description: "Create a new Cloudflare Queue. Requires confirm=true.",
+      inputSchema: {
+        account: accountParam,
+        name: z.string().describe("Queue name"),
+        confirm: z.boolean().describe("Must be true — this creates persistent queue infrastructure"),
+      },
     },
-    async ({ account, name }) => {
+    async ({ account, name, confirm }) => {
+      requireConfirm(confirm, `create Queue "${name}"`);
       const acct = await resolveAccountId(account);
       const resp = await cfFetch<Queue>(`/accounts/${acct}/queues`, {
         method: "POST",
@@ -68,16 +72,18 @@ export function registerQueueTools(server: McpServer): void {
     "cf_update_queue",
     {
       title: "Update Queue settings",
-      description: "Rename a Queue or change its delivery settings.",
+      description: "Rename a Queue or change its delivery settings. Requires confirm=true.",
       inputSchema: {
         account: accountParam,
         queue: queueParam,
         name: z.string().optional().describe("New queue name"),
         delivery_delay: z.number().int().optional().describe("Seconds to delay delivery of new messages"),
         message_retention_period: z.number().int().optional().describe("Seconds to retain messages"),
+        confirm: z.boolean().describe("Must be true — this changes live queue behaviour"),
       },
     },
-    async ({ account, queue, name, delivery_delay, message_retention_period }) => {
+    async ({ account, queue, name, delivery_delay, message_retention_period, confirm }) => {
+      requireConfirm(confirm, `update Queue "${queue}"`);
       const acct = await resolveAccountId(account);
       const id = await queueResolver.resolve(acct, queue);
       const settings = compact({ delivery_delay, message_retention_period });
@@ -144,9 +150,11 @@ export function registerQueueTools(server: McpServer): void {
         max_retries: z.number().int().optional(),
         max_wait_time_ms: z.number().int().optional(),
         dead_letter_queue: z.string().optional().describe("Queue name for messages that exhaust retries"),
+        confirm: z.boolean().describe("Must be true — this attaches a live message consumer"),
       },
     },
-    async ({ account, queue, type, script_name, batch_size, max_retries, max_wait_time_ms, dead_letter_queue }) => {
+    async ({ account, queue, type, script_name, batch_size, max_retries, max_wait_time_ms, dead_letter_queue, confirm }) => {
+      requireConfirm(confirm, `attach a ${type} consumer to Queue "${queue}"`);
       if (type === "worker" && !script_name) throw new Error("script_name is required for a 'worker' consumer.");
       const acct = await resolveAccountId(account);
       const id = await queueResolver.resolve(acct, queue);
@@ -179,7 +187,7 @@ export function registerQueueTools(server: McpServer): void {
       requireConfirm(confirm, `detach consumer ${consumer_id} from Queue "${queue}"`);
       const acct = await resolveAccountId(account);
       const id = await queueResolver.resolve(acct, queue);
-      await cfFetch(`/accounts/${acct}/queues/${id}/consumers/${consumer_id}`, { method: "DELETE" });
+      await cfFetch(`/accounts/${acct}/queues/${id}/consumers/${seg(consumer_id)}`, { method: "DELETE" });
       return textResult({ queue, detachedConsumer: consumer_id });
     }
   );
@@ -188,16 +196,18 @@ export function registerQueueTools(server: McpServer): void {
     "cf_queue_push",
     {
       title: "Push message(s) to a Queue",
-      description: "Publish one or more messages onto a Queue.",
+      description: "Publish one or more messages onto a Queue. Requires confirm=true.",
       inputSchema: {
         account: accountParam,
         queue: queueParam,
         messages: z
           .array(jsonObject())
           .describe("Messages, e.g. [{body: {...}, content_type: 'json', delay_seconds: 0}]"),
+        confirm: z.boolean().describe("Must be true — this delivers messages to live consumers"),
       },
     },
-    async ({ account, queue, messages }) => {
+    async ({ account, queue, messages, confirm }) => {
+      requireConfirm(confirm, `publish ${messages.length} message(s) to Queue "${queue}"`);
       const acct = await resolveAccountId(account);
       const id = await queueResolver.resolve(acct, queue);
       const path =
@@ -215,15 +225,18 @@ export function registerQueueTools(server: McpServer): void {
     {
       title: "Pull messages from a Queue",
       description:
-        "Pull a batch of messages from an http_pull Queue. Messages stay invisible for visibility_timeout_ms until acked.",
+        "Pull a batch of messages from an http_pull Queue. Messages stay invisible for visibility_timeout_ms until acked, " +
+        "so requires confirm=true.",
       inputSchema: {
         account: accountParam,
         queue: queueParam,
         batch_size: z.number().int().positive().max(100).optional().default(10),
         visibility_timeout_ms: z.number().int().optional(),
+        confirm: z.boolean().describe("Must be true — this temporarily changes message visibility"),
       },
     },
-    async ({ account, queue, batch_size, visibility_timeout_ms }) => {
+    async ({ account, queue, batch_size, visibility_timeout_ms, confirm }) => {
+      requireConfirm(confirm, `pull messages from Queue "${queue}"`);
       const acct = await resolveAccountId(account);
       const id = await queueResolver.resolve(acct, queue);
       const resp = await cfFetch(`/accounts/${acct}/queues/${id}/messages/pull`, {
