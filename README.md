@@ -5,7 +5,7 @@ A local [MCP](https://modelcontextprotocol.io) server that lets any MCP-capable 
 Queues, Pages, cache, WAF/firewall, rules, and analytics.
 
 **124 tools.** Every destructive one gated behind an explicit `confirm: true`.
-**119 verified end-to-end** against a live account.
+**118 verified end-to-end** against a live account.
 
 ```
 "add an A record for staging pointing at 1.2.3.4"

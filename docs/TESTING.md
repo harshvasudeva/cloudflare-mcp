@@ -21,7 +21,7 @@ wasn't appropriate).
 | **Pages** | create project → list → delete |
 | **Analytics** | `cf_dns_analytics` and `cf_graphql_query` both returned real data |
 
-**119 of 124 tools** confirmed reachable end-to-end. The remaining 5 are the
+**118 of 124 tools** confirmed reachable end-to-end. The remaining 6 are the
 account-owned-token rejections documented in [LIMITATIONS.md](LIMITATIONS.md).
 
 ## Bugs this testing caught
@@ -41,6 +41,58 @@ Live testing found real issues that static review alone did not:
   for Workers Routes added too (also its own permission group).
 - **Worker settings needs multipart, not JSON.** Confirmed against both official
   Cloudflare SDKs and then verified live.
+- **`cf_get_worker_code` rejects account-owned tokens** (`[10405] Method not allowed for
+  this authentication scheme`) even though every other Worker tool — deploy, settings,
+  secrets, schedules, versions, deployments, routes, domains — works fine on the same
+  token. Found by a deploy → get-settings → get-code → delete smoke test after the path-
+  encoding hardening pass, using a hyphenated worker name specifically to also confirm
+  `seg()` doesn't mangle normal names. Documented in LIMITATIONS.md; no workaround exists.
+
+## A code review found a systemic input-handling gap, fixed and test-covered
+
+A full-codebase security review (not just the live-testing pass above) found that user-
+supplied tool arguments were interpolated into request paths and local filesystem calls
+without sanitization — low-risk from a human typing tool calls, but real when an LLM
+chooses arguments while acting on untrusted content (a webpage, a document, a poisoned
+prompt). Fixed:
+
+- **Path traversal / query injection** via unencoded path segments (`../../../user/tokens`
+  in a worker name rewrote the request target entirely) — ~50 call sites across 9 files,
+  fixed with a `seg()` helper and covered by `test/path-traversal.test.mjs`.
+- **Credential echo** — Logpush jobs embed live credentials in `destination_conf`; now
+  redacted before returning.
+- **Local file access** on `cf_put_r2_object`/`cf_get_r2_object` — not sandboxed (that's
+  the tool's actual job), but both now require `confirm` and document the risk explicitly.
+
+Plus a pass through the earlier review's Suggestions: `.env` quote-stripping,
+`toFqdn`'s case/trailing-dot handling, `cf_list_dns_records`'s missing FQDN
+normalization, `cf_verify_token`'s stale-cache bypass, `cfFetchRaw`'s binary-safety
+(base64 fallback by content-type), lazy-loading the AWS SDK so excluding `r2-objects`
+via `CF_MODULES` actually skips it, compact (non-pretty-printed) JSON responses to cut
+token overhead, and hoisting the drifted `accountParam`/`zoneParam` duplicates into
+`util.ts`. See `git log` for the full diff.
+
+## Automated tests
+
+```bash
+npm test
+```
+
+Builds, then runs `test/*.test.mjs` under Node's built-in test runner (no framework
+dependency). Two suites:
+
+- **`confirm-gating.test.mjs`** — spawns the built server and asserts that every tool
+  whose description promises `confirm=true` actually requires it in its schema. This is
+  the exact class of bug that's easy to introduce silently in a 124-tool codebase — a
+  copy-pasted tool that forgets one field. Three tools are documented, tracked-by-name
+  exceptions where `confirm` is conditionally required by runtime logic instead
+  (`cf_d1_query`, `cf_get_r2_object`, `cf_queue_ack`).
+- **`path-traversal.test.mjs`** — proves the `seg()` fix by constructing the actual
+  `new URL()` call production code uses, with and without encoding, against the exact
+  payload from the code review.
+
+Neither suite touches live Cloudflare credentials — both only list tools and inspect
+schemas/URL construction, never call a tool against the real API.
 
 ## Testing without an MCP client
 
