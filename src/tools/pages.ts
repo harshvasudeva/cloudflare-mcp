@@ -1,9 +1,8 @@
 import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { cfFetch, cfFetchAll, resolveAccountId } from "../cloudflare.js";
-import { textResult, requireConfirm, compact, jsonObject } from "../util.js";
+import { cfFetch, cfFetchAll, resolveAccountId, seg } from "../cloudflare.js";
+import { textResult, requireConfirm, compact, jsonObject, accountParam } from "../util.js";
 
-const accountParam = z.string().optional().describe("Account ID; defaults to CF_ACCOUNT_ID.");
 const projectParam = z.string().describe("Pages project name");
 
 export function registerPagesTools(server: McpServer): void {
@@ -43,7 +42,7 @@ export function registerPagesTools(server: McpServer): void {
     },
     async ({ account, project }) => {
       const acct = await resolveAccountId(account);
-      const resp = await cfFetch(`/accounts/${acct}/pages/projects/${project}`);
+      const resp = await cfFetch(`/accounts/${acct}/pages/projects/${seg(project)}`);
       return textResult(resp.result);
     }
   );
@@ -52,7 +51,7 @@ export function registerPagesTools(server: McpServer): void {
     "cf_create_pages_project",
     {
       title: "Create a Pages project",
-      description: "Create a new Cloudflare Pages project.",
+      description: "Create a new Cloudflare Pages project. Requires confirm=true.",
       inputSchema: {
         account: accountParam,
         name: z.string().describe("Project name (becomes <name>.pages.dev)"),
@@ -61,9 +60,11 @@ export function registerPagesTools(server: McpServer): void {
           .optional()
           .describe("e.g. {build_command: 'npm run build', destination_dir: 'dist'}"),
         source: jsonObject().optional().describe("Git source config, if connecting a repository"),
+        confirm: z.boolean().describe("Must be true — this creates a live Pages project"),
       },
     },
-    async ({ account, name, production_branch, build_config, source }) => {
+    async ({ account, name, production_branch, build_config, source, confirm }) => {
+      requireConfirm(confirm, `create Pages project "${name}"`);
       const acct = await resolveAccountId(account);
       const resp = await cfFetch(`/accounts/${acct}/pages/projects`, {
         method: "POST",
@@ -94,7 +95,7 @@ export function registerPagesTools(server: McpServer): void {
       const acct = await resolveAccountId(account);
       const patch = compact({ production_branch, build_config, deployment_configs });
       if (Object.keys(patch).length === 0) throw new Error("Provide at least one field to update.");
-      const resp = await cfFetch(`/accounts/${acct}/pages/projects/${project}`, {
+      const resp = await cfFetch(`/accounts/${acct}/pages/projects/${seg(project)}`, {
         method: "PATCH",
         body: patch,
       });
@@ -116,7 +117,7 @@ export function registerPagesTools(server: McpServer): void {
     async ({ account, project, confirm }) => {
       requireConfirm(confirm, `delete Pages project "${project}" and all its deployments`);
       const acct = await resolveAccountId(account);
-      await cfFetch(`/accounts/${acct}/pages/projects/${project}`, { method: "DELETE" });
+      await cfFetch(`/accounts/${acct}/pages/projects/${seg(project)}`, { method: "DELETE" });
       return textResult({ deleted: project });
     }
   );
@@ -135,7 +136,7 @@ export function registerPagesTools(server: McpServer): void {
     async ({ account, project, env }) => {
       const acct = await resolveAccountId(account);
       const resp = await cfFetch<Array<Record<string, unknown>>>(
-        `/accounts/${acct}/pages/projects/${project}/deployments`,
+        `/accounts/${acct}/pages/projects/${seg(project)}/deployments`,
         { query: { env } }
       );
       return textResult({
@@ -161,7 +162,9 @@ export function registerPagesTools(server: McpServer): void {
     },
     async ({ account, project, deployment_id }) => {
       const acct = await resolveAccountId(account);
-      const resp = await cfFetch(`/accounts/${acct}/pages/projects/${project}/deployments/${deployment_id}`);
+      const resp = await cfFetch(
+        `/accounts/${acct}/pages/projects/${seg(project)}/deployments/${seg(deployment_id)}`
+      );
       return textResult(resp.result);
     }
   );
@@ -176,7 +179,7 @@ export function registerPagesTools(server: McpServer): void {
     async ({ account, project, deployment_id }) => {
       const acct = await resolveAccountId(account);
       const resp = await cfFetch(
-        `/accounts/${acct}/pages/projects/${project}/deployments/${deployment_id}/history/logs`
+        `/accounts/${acct}/pages/projects/${seg(project)}/deployments/${seg(deployment_id)}/history/logs`
       );
       return textResult({ project, deployment_id, logs: resp.result });
     }
@@ -186,13 +189,19 @@ export function registerPagesTools(server: McpServer): void {
     "cf_retry_pages_deployment",
     {
       title: "Retry a Pages deployment",
-      description: "Re-run a failed Pages deployment.",
-      inputSchema: { account: accountParam, project: projectParam, deployment_id: z.string() },
+      description: "Re-run a failed Pages deployment. Requires confirm=true.",
+      inputSchema: {
+        account: accountParam,
+        project: projectParam,
+        deployment_id: z.string(),
+        confirm: z.boolean().describe("Must be true — this starts a deployment"),
+      },
     },
-    async ({ account, project, deployment_id }) => {
+    async ({ account, project, deployment_id, confirm }) => {
+      requireConfirm(confirm, `retry Pages deployment ${deployment_id} for project "${project}"`);
       const acct = await resolveAccountId(account);
       const resp = await cfFetch(
-        `/accounts/${acct}/pages/projects/${project}/deployments/${deployment_id}/retry`,
+        `/accounts/${acct}/pages/projects/${seg(project)}/deployments/${seg(deployment_id)}/retry`,
         { method: "POST" }
       );
       return textResult({ project, retried: deployment_id, result: resp.result });
@@ -215,7 +224,7 @@ export function registerPagesTools(server: McpServer): void {
       requireConfirm(confirm, `roll back Pages project "${project}" to deployment ${deployment_id}`);
       const acct = await resolveAccountId(account);
       const resp = await cfFetch(
-        `/accounts/${acct}/pages/projects/${project}/deployments/${deployment_id}/rollback`,
+        `/accounts/${acct}/pages/projects/${seg(project)}/deployments/${seg(deployment_id)}/rollback`,
         { method: "POST" }
       );
       return textResult({ project, rolledBackTo: deployment_id, result: resp.result });
@@ -237,7 +246,7 @@ export function registerPagesTools(server: McpServer): void {
     async ({ account, project, deployment_id, confirm }) => {
       requireConfirm(confirm, `delete Pages deployment ${deployment_id}`);
       const acct = await resolveAccountId(account);
-      await cfFetch(`/accounts/${acct}/pages/projects/${project}/deployments/${deployment_id}`, {
+      await cfFetch(`/accounts/${acct}/pages/projects/${seg(project)}/deployments/${seg(deployment_id)}`, {
         method: "DELETE",
       });
       return textResult({ project, deleted: deployment_id });
@@ -253,7 +262,7 @@ export function registerPagesTools(server: McpServer): void {
     },
     async ({ account, project }) => {
       const acct = await resolveAccountId(account);
-      const resp = await cfFetch(`/accounts/${acct}/pages/projects/${project}/domains`);
+      const resp = await cfFetch(`/accounts/${acct}/pages/projects/${seg(project)}/domains`);
       return textResult({ project, domains: resp.result });
     }
   );
@@ -262,12 +271,18 @@ export function registerPagesTools(server: McpServer): void {
     "cf_add_pages_domain",
     {
       title: "Add a Pages custom domain",
-      description: "Attach a custom domain to a Pages project.",
-      inputSchema: { account: accountParam, project: projectParam, domain: z.string() },
+      description: "Attach a custom domain to a Pages project. Requires confirm=true.",
+      inputSchema: {
+        account: accountParam,
+        project: projectParam,
+        domain: z.string(),
+        confirm: z.boolean().describe("Must be true — this changes live domain routing"),
+      },
     },
-    async ({ account, project, domain }) => {
+    async ({ account, project, domain, confirm }) => {
+      requireConfirm(confirm, `add domain "${domain}" to Pages project "${project}"`);
       const acct = await resolveAccountId(account);
-      const resp = await cfFetch(`/accounts/${acct}/pages/projects/${project}/domains`, {
+      const resp = await cfFetch(`/accounts/${acct}/pages/projects/${seg(project)}/domains`, {
         method: "POST",
         body: { name: domain },
       });
@@ -290,7 +305,7 @@ export function registerPagesTools(server: McpServer): void {
     async ({ account, project, domain, confirm }) => {
       requireConfirm(confirm, `remove domain "${domain}" from Pages project "${project}"`);
       const acct = await resolveAccountId(account);
-      await cfFetch(`/accounts/${acct}/pages/projects/${project}/domains/${domain}`, { method: "DELETE" });
+      await cfFetch(`/accounts/${acct}/pages/projects/${seg(project)}/domains/${seg(domain)}`, { method: "DELETE" });
       return textResult({ project, removed: domain });
     }
   );

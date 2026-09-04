@@ -5,7 +5,7 @@ are the reason that's reasonable rather than reckless.
 
 ## The `confirm: true` gate
 
-Every tool that deletes, overwrites, or otherwise affects live traffic or data declares
+Every tool that creates, deletes, overwrites, or otherwise affects live traffic or data declares
 `confirm` as a **required** boolean in its input schema. Because it's required rather than
 optional, the MCP protocol layer itself rejects the call before the handler even runs —
 a stronger guarantee than a runtime check alone.
@@ -32,13 +32,14 @@ a stronger guarantee than a runtime check alone.
 `cf_update_ruleset_rule`, `cf_create_access_rule`, `cf_update_pages_project`,
 `cf_create_logpush_job`, `cf_queue_ack` (when acknowledging), and D1 writes.
 
-### Deliberately not gated
+**Creates and other live actions:**
+`cf_create_kv_namespace`, `cf_rename_kv_namespace`, `cf_create_d1_database`,
+`cf_create_queue`, `cf_update_queue`, `cf_create_queue_consumer`, `cf_queue_push`,
+`cf_queue_pull`, `cf_create_r2_bucket`, `cf_create_pages_project`,
+`cf_retry_pages_deployment`, `cf_add_pages_domain`, `cf_add_dns_record`,
+`cf_create_page_rule`, `cf_update_page_rule`, and `cf_create_redirect`.
 
-Creating brand-new empty resources is additive and reversible, so it runs freely:
-`cf_create_kv_namespace`, `cf_create_d1_database`, `cf_create_queue`,
-`cf_create_r2_bucket`, `cf_create_pages_project`, `cf_add_dns_record`.
-
-All read/list/get tools are ungated.
+Read/list/get tools and the short-lived Worker log-tail session are ungated.
 
 ## D1 SQL gating
 

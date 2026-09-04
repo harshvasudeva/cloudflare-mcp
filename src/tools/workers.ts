@@ -1,12 +1,7 @@
 import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { cfFetch, cfFetchRaw, resolveAccountId, resolveZone } from "../cloudflare.js";
-import { textResult, rawResult, requireConfirm, compact, jsonObject } from "../util.js";
-
-const accountParam = z
-  .string()
-  .optional()
-  .describe("Account ID. Defaults to CF_ACCOUNT_ID, else the first account the token can see.");
+import { cfFetch, cfFetchRaw, resolveAccountId, resolveZone, seg } from "../cloudflare.js";
+import { textResult, requireConfirm, compact, jsonObject, accountParam, zoneParam } from "../util.js";
 
 const BINDING_DOC = [
   "Array of binding objects. Every binding needs `type` and `name`, plus type-specific fields:",
@@ -41,7 +36,7 @@ export function registerWorkerTools(server: McpServer): void {
     },
     async ({ account, name }) => {
       const acct = await resolveAccountId(account);
-      const resp = await cfFetch(`/accounts/${acct}/workers/scripts/${name}/settings`);
+      const resp = await cfFetch(`/accounts/${acct}/workers/scripts/${seg(name)}/settings`);
       return textResult({ worker: name, settings: resp.result });
     }
   );
@@ -51,13 +46,14 @@ export function registerWorkerTools(server: McpServer): void {
     {
       title: "Get Worker source code",
       description:
-        "Download the current source of a Worker. Module workers come back as a multipart body containing each module.",
+        "Download the current source of a Worker. Module workers come back as a multipart body containing each " +
+        "module; base64:true means the body is base64-encoded binary rather than readable text.",
       inputSchema: { account: accountParam, name: z.string().describe("Worker script name") },
     },
     async ({ account, name }) => {
       const acct = await resolveAccountId(account);
-      const body = await cfFetchRaw(`/accounts/${acct}/workers/scripts/${name}/content`);
-      return rawResult(body);
+      const body = await cfFetchRaw(`/accounts/${acct}/workers/scripts/${seg(name)}/content`);
+      return textResult({ worker: name, ...body });
     }
   );
 
@@ -122,7 +118,7 @@ export function registerWorkerTools(server: McpServer): void {
         entry
       );
 
-      const resp = await cfFetch(`/accounts/${acct}/workers/scripts/${args.name}`, {
+      const resp = await cfFetch(`/accounts/${acct}/workers/scripts/${seg(args.name)}`, {
         method: "PUT",
         form,
       });
@@ -149,7 +145,7 @@ export function registerWorkerTools(server: McpServer): void {
     async ({ account, name, force, confirm }) => {
       requireConfirm(confirm, `delete Worker "${name}"`);
       const acct = await resolveAccountId(account);
-      await cfFetch(`/accounts/${acct}/workers/scripts/${name}`, {
+      await cfFetch(`/accounts/${acct}/workers/scripts/${seg(name)}`, {
         method: "DELETE",
         query: { force: force ? "true" : undefined },
       });
@@ -186,7 +182,7 @@ export function registerWorkerTools(server: McpServer): void {
       // unlike most of the API. Mirrors the metadata part in cf_deploy_worker.
       const form = new FormData();
       form.append("settings", new Blob([JSON.stringify(settings)], { type: "application/json" }));
-      const resp = await cfFetch(`/accounts/${acct}/workers/scripts/${name}/settings`, {
+      const resp = await cfFetch(`/accounts/${acct}/workers/scripts/${seg(name)}/settings`, {
         method: "PATCH",
         form,
       });
@@ -203,7 +199,7 @@ export function registerWorkerTools(server: McpServer): void {
     },
     async ({ account, name }) => {
       const acct = await resolveAccountId(account);
-      const resp = await cfFetch(`/accounts/${acct}/workers/scripts/${name}/versions`);
+      const resp = await cfFetch(`/accounts/${acct}/workers/scripts/${seg(name)}/versions`);
       return textResult({ worker: name, versions: resp.result });
     }
   );
@@ -217,7 +213,7 @@ export function registerWorkerTools(server: McpServer): void {
     },
     async ({ account, name }) => {
       const acct = await resolveAccountId(account);
-      const resp = await cfFetch(`/accounts/${acct}/workers/scripts/${name}/deployments`);
+      const resp = await cfFetch(`/accounts/${acct}/workers/scripts/${seg(name)}/deployments`);
       return textResult({ worker: name, deployments: resp.result });
     }
   );
@@ -245,7 +241,7 @@ export function registerWorkerTools(server: McpServer): void {
       const acct = await resolveAccountId(account);
       const payload = versions ?? (version_id ? [{ version_id, percentage: 100 }] : undefined);
       if (!payload) throw new Error("Provide either 'version_id' or 'versions'.");
-      const resp = await cfFetch(`/accounts/${acct}/workers/scripts/${name}/deployments`, {
+      const resp = await cfFetch(`/accounts/${acct}/workers/scripts/${seg(name)}/deployments`, {
         method: "POST",
         body: { strategy: "percentage", versions: payload },
       });
@@ -262,7 +258,7 @@ export function registerWorkerTools(server: McpServer): void {
     },
     async ({ account, name }) => {
       const acct = await resolveAccountId(account);
-      const resp = await cfFetch(`/accounts/${acct}/workers/scripts/${name}/secrets`);
+      const resp = await cfFetch(`/accounts/${acct}/workers/scripts/${seg(name)}/secrets`);
       return textResult({ worker: name, secrets: resp.result });
     }
   );
@@ -283,7 +279,7 @@ export function registerWorkerTools(server: McpServer): void {
     async ({ account, name, secret_name, text, confirm }) => {
       requireConfirm(confirm, `set secret "${secret_name}" on Worker "${name}"`);
       const acct = await resolveAccountId(account);
-      const resp = await cfFetch(`/accounts/${acct}/workers/scripts/${name}/secrets`, {
+      const resp = await cfFetch(`/accounts/${acct}/workers/scripts/${seg(name)}/secrets`, {
         method: "PUT",
         body: { name: secret_name, text, type: "secret_text" },
       });
@@ -306,7 +302,9 @@ export function registerWorkerTools(server: McpServer): void {
     async ({ account, name, secret_name, confirm }) => {
       requireConfirm(confirm, `delete secret "${secret_name}" from Worker "${name}"`);
       const acct = await resolveAccountId(account);
-      await cfFetch(`/accounts/${acct}/workers/scripts/${name}/secrets/${secret_name}`, { method: "DELETE" });
+      await cfFetch(`/accounts/${acct}/workers/scripts/${seg(name)}/secrets/${seg(secret_name)}`, {
+        method: "DELETE",
+      });
       return textResult({ worker: name, deletedSecret: secret_name });
     }
   );
@@ -320,7 +318,7 @@ export function registerWorkerTools(server: McpServer): void {
     },
     async ({ account, name }) => {
       const acct = await resolveAccountId(account);
-      const resp = await cfFetch(`/accounts/${acct}/workers/scripts/${name}/schedules`);
+      const resp = await cfFetch(`/accounts/${acct}/workers/scripts/${seg(name)}/schedules`);
       return textResult({ worker: name, schedules: resp.result });
     }
   );
@@ -341,7 +339,7 @@ export function registerWorkerTools(server: McpServer): void {
     async ({ account, name, schedules, confirm }) => {
       requireConfirm(confirm, `replace cron triggers on Worker "${name}"`);
       const acct = await resolveAccountId(account);
-      const resp = await cfFetch(`/accounts/${acct}/workers/scripts/${name}/schedules`, {
+      const resp = await cfFetch(`/accounts/${acct}/workers/scripts/${seg(name)}/schedules`, {
         method: "PUT",
         body: schedules,
       });
@@ -356,7 +354,7 @@ export function registerWorkerTools(server: McpServer): void {
     {
       title: "List Worker routes",
       description: "List URL patterns in a zone that are routed to Workers.",
-      inputSchema: { zone: z.string().optional().describe("Zone name or ID; defaults to CF_ZONE") },
+      inputSchema: { zone: zoneParam },
     },
     async ({ zone }) => {
       const z_ = await resolveZone(zone);
@@ -372,7 +370,7 @@ export function registerWorkerTools(server: McpServer): void {
       description:
         "Route a URL pattern in a zone to a Worker, e.g. pattern 'example.com/api/*'. Requires confirm=true.",
       inputSchema: {
-        zone: z.string().optional(),
+        zone: zoneParam,
         pattern: z.string().describe("URL pattern, e.g. example.com/api/*"),
         script: z.string().optional().describe("Worker script name; omit to disable Workers on this pattern"),
         confirm: z.boolean().describe("Must be true — this changes live request routing"),
@@ -396,7 +394,7 @@ export function registerWorkerTools(server: McpServer): void {
       description:
         "Change the pattern or target script of an existing Worker route. This is a full replace, so requires confirm=true.",
       inputSchema: {
-        zone: z.string().optional(),
+        zone: zoneParam,
         id: z.string().describe("Route ID"),
         pattern: z.string().describe("URL pattern"),
         script: z.string().optional(),
@@ -406,7 +404,7 @@ export function registerWorkerTools(server: McpServer): void {
     async ({ zone, id, pattern, script, confirm }) => {
       requireConfirm(confirm, `update Worker route ${id}`);
       const z_ = await resolveZone(zone);
-      const resp = await cfFetch(`/zones/${z_.id}/workers/routes/${id}`, {
+      const resp = await cfFetch(`/zones/${z_.id}/workers/routes/${seg(id)}`, {
         method: "PUT",
         body: { pattern, script },
       });
@@ -420,7 +418,7 @@ export function registerWorkerTools(server: McpServer): void {
       title: "Delete a Worker route",
       description: "Remove a Worker route from a zone. Requires confirm=true.",
       inputSchema: {
-        zone: z.string().optional(),
+        zone: zoneParam,
         id: z.string().describe("Route ID"),
         confirm: z.boolean().describe("Must be true to actually delete"),
       },
@@ -428,7 +426,7 @@ export function registerWorkerTools(server: McpServer): void {
     async ({ zone, id, confirm }) => {
       requireConfirm(confirm, `delete Worker route ${id}`);
       const z_ = await resolveZone(zone);
-      await cfFetch(`/zones/${z_.id}/workers/routes/${id}`, { method: "DELETE" });
+      await cfFetch(`/zones/${z_.id}/workers/routes/${seg(id)}`, { method: "DELETE" });
       return textResult({ zone: z_.name, deletedRoute: id });
     }
   );
@@ -459,7 +457,7 @@ export function registerWorkerTools(server: McpServer): void {
         account: accountParam,
         hostname: z.string().describe("Fully-qualified hostname, e.g. api.example.com"),
         service: z.string().describe("Worker script name"),
-        zone: z.string().optional().describe("Zone name or ID that owns the hostname"),
+        zone: zoneParam.describe("Zone name or ID that owns the hostname"),
         environment: z.string().optional().default("production"),
         confirm: z.boolean().describe("Must be true — this creates a live DNS record and route"),
       },
@@ -490,7 +488,7 @@ export function registerWorkerTools(server: McpServer): void {
     async ({ account, id, confirm }) => {
       requireConfirm(confirm, `detach Worker domain ${id}`);
       const acct = await resolveAccountId(account);
-      await cfFetch(`/accounts/${acct}/workers/domains/${id}`, { method: "DELETE" });
+      await cfFetch(`/accounts/${acct}/workers/domains/${seg(id)}`, { method: "DELETE" });
       return textResult({ detached: id });
     }
   );
@@ -519,7 +517,7 @@ export function registerWorkerTools(server: McpServer): void {
     },
     async ({ account, name }) => {
       const acct = await resolveAccountId(account);
-      const resp = await cfFetch(`/accounts/${acct}/workers/scripts/${name}/tails`, { method: "POST" });
+      const resp = await cfFetch(`/accounts/${acct}/workers/scripts/${seg(name)}/tails`, { method: "POST" });
       return textResult({ worker: name, tail: resp.result });
     }
   );

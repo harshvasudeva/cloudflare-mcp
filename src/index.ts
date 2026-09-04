@@ -5,7 +5,6 @@ import { registerZoneTools } from "./tools/zones.js";
 import { registerDnsTools } from "./tools/dns.js";
 import { registerWorkerTools } from "./tools/workers.js";
 import { registerR2Tools } from "./tools/r2.js";
-import { registerR2ObjectTools } from "./tools/r2-objects.js";
 import { registerKvTools } from "./tools/kv.js";
 import { registerD1Tools } from "./tools/d1.js";
 import { registerQueueTools } from "./tools/queues.js";
@@ -15,12 +14,18 @@ import { registerFirewallTools } from "./tools/firewall.js";
 import { registerRulesTools } from "./tools/rules.js";
 import { registerAnalyticsTools } from "./tools/analytics.js";
 
-const MODULES: Record<string, (server: McpServer) => void> = {
+type ToolRegistrar = (server: McpServer) => void | Promise<void>;
+
+const MODULES: Record<string, ToolRegistrar> = {
   // `zones` is always registered — it carries cf_verify_token / cf_check_permissions.
   dns: registerDnsTools,
   workers: registerWorkerTools,
   r2: registerR2Tools,
-  "r2-objects": registerR2ObjectTools,
+  // Keep the AWS SDK out of processes that explicitly disable r2-objects.
+  "r2-objects": async (server) => {
+    const { registerR2ObjectTools } = await import("./tools/r2-objects.js");
+    registerR2ObjectTools(server);
+  },
   kv: registerKvTools,
   d1: registerD1Tools,
   queues: registerQueueTools,
@@ -63,7 +68,7 @@ const server = new McpServer({
 
 registerZoneTools(server);
 for (const name of selectedModules()) {
-  MODULES[name](server);
+  await MODULES[name](server);
 }
 
 const transport = new StdioServerTransport();

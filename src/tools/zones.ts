@@ -17,7 +17,9 @@ export function registerZoneTools(server: McpServer): void {
         return textResult({ ok: false, reason: "CF_ZONE is not configured, cannot run the zone-lookup check." });
       }
       try {
-        const zone = await resolveZone(CF_DEFAULT_ZONE);
+        // Token checks must hit Cloudflare even after another tool has cached
+        // this zone; otherwise a revoked token would keep reporting success.
+        const zone = await resolveZone(CF_DEFAULT_ZONE, { bypassCache: true });
         return textResult({ ok: true, zone: zone.name, zoneId: zone.id, status: zone.status });
       } catch (err) {
         return textResult({ ok: false, reason: err instanceof Error ? err.message : String(err) });

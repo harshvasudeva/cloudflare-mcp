@@ -1,9 +1,7 @@
 import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { cfFetch, resolveZone, getPhaseEntrypoint } from "../cloudflare.js";
-import { textResult, requireConfirm, compact, jsonObject } from "../util.js";
-
-const zoneParam = z.string().optional().describe("Zone name or ID; defaults to CF_ZONE.");
+import { cfFetch, resolveZone, getPhaseEntrypoint, seg } from "../cloudflare.js";
+import { textResult, requireConfirm, compact, jsonObject, zoneParam } from "../util.js";
 
 const REDIRECT_PHASE = "http_request_dynamic_redirect";
 
@@ -29,7 +27,7 @@ export function registerRulesTools(server: McpServer): void {
     {
       title: "Create a Page Rule",
       description:
-        "Create a legacy Page Rule. targets is e.g. " +
+        "Create a legacy Page Rule. Requires confirm=true. targets is e.g. " +
         "[{target: 'url', constraint: {operator: 'matches', value: '*example.com/blog*'}}] and actions is e.g. " +
         "[{id: 'cache_level', value: 'cache_everything'}].",
       inputSchema: {
@@ -38,9 +36,11 @@ export function registerRulesTools(server: McpServer): void {
         actions: z.array(jsonObject()).describe("Actions to apply"),
         priority: z.number().int().optional(),
         status: z.enum(["active", "disabled"]).optional().default("active"),
+        confirm: z.boolean().describe("Must be true — this changes live zone behaviour"),
       },
     },
-    async ({ zone, targets, actions, priority, status }) => {
+    async ({ zone, targets, actions, priority, status, confirm }) => {
+      requireConfirm(confirm, "create a Page Rule");
       const z_ = await resolveZone(zone);
       const resp = await cfFetch(`/zones/${z_.id}/pagerules`, {
         method: "POST",
@@ -54,7 +54,7 @@ export function registerRulesTools(server: McpServer): void {
     "cf_update_page_rule",
     {
       title: "Update a Page Rule",
-      description: "Patch an existing Page Rule's targets, actions, priority, or status.",
+      description: "Patch an existing Page Rule's targets, actions, priority, or status. Requires confirm=true.",
       inputSchema: {
         zone: zoneParam,
         rule_id: z.string(),
@@ -62,13 +62,15 @@ export function registerRulesTools(server: McpServer): void {
         actions: z.array(jsonObject()).optional(),
         priority: z.number().int().optional(),
         status: z.enum(["active", "disabled"]).optional(),
+        confirm: z.boolean().describe("Must be true — this changes live zone behaviour"),
       },
     },
-    async ({ zone, rule_id, ...rest }) => {
+    async ({ zone, rule_id, confirm, ...rest }) => {
+      requireConfirm(confirm, `update Page Rule ${rule_id}`);
       const z_ = await resolveZone(zone);
       const patch = compact(rest);
       if (Object.keys(patch).length === 0) throw new Error("Provide at least one field to update.");
-      const resp = await cfFetch(`/zones/${z_.id}/pagerules/${rule_id}`, { method: "PATCH", body: patch });
+      const resp = await cfFetch(`/zones/${z_.id}/pagerules/${seg(rule_id)}`, { method: "PATCH", body: patch });
       return textResult({ zone: z_.name, pageRule: resp.result });
     }
   );
@@ -87,7 +89,7 @@ export function registerRulesTools(server: McpServer): void {
     async ({ zone, rule_id, confirm }) => {
       requireConfirm(confirm, `delete Page Rule ${rule_id}`);
       const z_ = await resolveZone(zone);
-      await cfFetch(`/zones/${z_.id}/pagerules/${rule_id}`, { method: "DELETE" });
+      await cfFetch(`/zones/${z_.id}/pagerules/${seg(rule_id)}`, { method: "DELETE" });
       return textResult({ zone: z_.name, deletedPageRule: rule_id });
     }
   );
@@ -115,7 +117,7 @@ export function registerRulesTools(server: McpServer): void {
     {
       title: "Create a single redirect",
       description:
-        "Add a URL redirect rule. Give either a static target_url, or an expression + dynamic target expression. " +
+        "Add a URL redirect rule. Requires confirm=true. Give either a static target_url, or an expression + dynamic target expression. " +
         "Example: source_expression '(http.request.full_uri wildcard \"https://example.com/old/*\")', " +
         "target_url 'https://example.com/new', status 301.",
       inputSchema: {
@@ -130,9 +132,11 @@ export function registerRulesTools(server: McpServer): void {
           .default(false)
           .describe("Treat target_url as a Cloudflare expression rather than a literal URL"),
         description: z.string().optional(),
+        confirm: z.boolean().describe("Must be true — this changes live request routing"),
       },
     },
-    async ({ zone, source_expression, target_url, status, preserve_query_string, dynamic, description }) => {
+    async ({ zone, source_expression, target_url, status, preserve_query_string, dynamic, description, confirm }) => {
+      requireConfirm(confirm, "create a redirect rule");
       const z_ = await resolveZone(zone);
       const newRule = compact({
         expression: source_expression,
@@ -178,7 +182,7 @@ export function registerRulesTools(server: McpServer): void {
       if (!entry) {
         throw new Error(`No redirects exist on zone "${z_.name}" — nothing to delete.`);
       }
-      await cfFetch(`/zones/${z_.id}/rulesets/${entry.id}/rules/${rule_id}`, { method: "DELETE" });
+      await cfFetch(`/zones/${z_.id}/rulesets/${entry.id}/rules/${seg(rule_id)}`, { method: "DELETE" });
       return textResult({ zone: z_.name, deletedRedirect: rule_id });
     }
   );

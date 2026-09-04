@@ -12,9 +12,26 @@ import { z } from "zod";
  */
 export const jsonObject = () => z.object({}).passthrough();
 
-/** Wraps a value as an MCP text result containing pretty-printed JSON. */
+/**
+ * Account/zone parameters shared by nearly every tool. Hoisted here after
+ * their per-file copies drifted into inconsistent wording (two variants for
+ * account, four for zone, three tools with no description at all) — one
+ * definition means one wording, always in sync with what the resolvers
+ * actually do.
+ */
+export const accountParam = z
+  .string()
+  .optional()
+  .describe("Account ID. Defaults to CF_ACCOUNT_ID, else the first account the token can see.");
+
+export const zoneParam = z
+  .string()
+  .optional()
+  .describe("Zone name or zone ID. Defaults to CF_ZONE from server config if omitted.");
+
+/** Wraps a value as an MCP text result. Compact JSON — this is read by an LLM, not a human, and indentation is pure token overhead across 124 tools' worth of responses. */
 export function textResult(value: unknown) {
-  return { content: [{ type: "text" as const, text: JSON.stringify(value, null, 2) }] };
+  return { content: [{ type: "text" as const, text: JSON.stringify(value) }] };
 }
 
 /** Wraps an already-formatted string as an MCP text result. */

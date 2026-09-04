@@ -16,7 +16,15 @@ function loadDotEnvFallback(): void {
     const match = line.match(/^\s*([^=]+)=(.*)$/);
     if (!match) continue;
     const key = match[1].trim();
-    const value = match[2].trim();
+    let value = match[2].trim();
+    // Strip one layer of matching quotes, same as standard dotenv behavior —
+    // without this, CF_API_TOKEN="abc" becomes the literal token '"abc"'.
+    if (
+      (value.startsWith('"') && value.endsWith('"') && value.length >= 2) ||
+      (value.startsWith("'") && value.endsWith("'") && value.length >= 2)
+    ) {
+      value = value.slice(1, -1);
+    }
     if (process.env[key] === undefined) {
       process.env[key] = value;
     }
@@ -140,6 +148,29 @@ function buildError(path: string, status: number, errors?: Array<{ code: number;
   return new CloudflareApiError(message, status, errors, hint);
 }
 
+/**
+ * Encodes a value for safe use as a single URL path segment.
+ *
+ * Every tool argument that ends up interpolated directly into a request path
+ * (worker names, bucket names, rule/ruleset ids, project names, ...) must go
+ * through this. Without it, `new URL()` normalizes `../` sequences in the
+ * finished path — a tool arg like `name: "../../../user/tokens"` silently
+ * rewrites `/accounts/X/workers/scripts/{name}` into `/accounts/user/tokens`,
+ * and a value like `"foo?per_page=999"` injects extra query parameters.
+ * Confirmed by direct `new URL()` construction, not theoretical.
+ *
+ * Values that are already known-safe — Cloudflare-issued ids matched against
+ * a strict hex/uuid pattern by `resolveZone`/`resolveAccountId`/
+ * `makeNameResolver`, or values that go through `URLSearchParams` (query
+ * params, which encode automatically) — do not need this.
+ */
+export function seg(value: string): string {
+  // encodeURIComponent intentionally leaves dots untouched. A complete `.` or
+  // `..` path segment would still be normalized by new URL(), so encode dots
+  // as well to preserve every user-supplied value as exactly one segment.
+  return encodeURIComponent(value).replace(/\./g, "%2E");
+}
+
 export type CfFetchInit = {
   method?: string;
   /** JSON request body. Ignored when `form` is set. */
@@ -203,16 +234,31 @@ export async function cfFetch<T = unknown>(path: string, init: CfFetchInit = {})
   return json;
 }
 
+// A multipart Worker bundle can include binary parts such as WebAssembly
+// modules. Return the entire opaque bundle as base64 instead of passing it
+// through res.text(), which would corrupt those parts.
+const TEXTUAL_CONTENT_TYPE =
+  /^(text\/|application\/(json|javascript|xml|x-www-form-urlencoded)|.*\+(json|xml))/i;
+
 /**
  * Call returning the raw response body. Used by endpoints that do not wrap
  * their payload in the standard envelope — worker script content, KV values.
+ *
+ * Binary content (anything without a textual Content-Type — e.g. a KV value
+ * storing an image, or a wasm module in a multipart Worker upload) is
+ * returned as `{ base64: true, data }` instead of decoded as UTF-8 text,
+ * which would otherwise corrupt it. Textual content returns `{ base64:
+ * false, data }` with `data` as plain text.
  */
-export async function cfFetchRaw(path: string, init: CfFetchInit = {}): Promise<string> {
+export async function cfFetchRaw(
+  path: string,
+  init: CfFetchInit = {}
+): Promise<{ base64: boolean; data: string }> {
   const { url, options } = buildRequest(path, init);
   const res = await fetch(url, options);
-  const text = await res.text();
 
   if (!res.ok) {
+    const text = await res.text();
     let errors: Array<{ code: number; message: string }> | undefined;
     try {
       errors = (JSON.parse(text) as CfResponse<unknown>).errors;
@@ -221,7 +267,13 @@ export async function cfFetchRaw(path: string, init: CfFetchInit = {}): Promise<
     }
     throw buildError(path, res.status, errors);
   }
-  return text;
+
+  const contentType = res.headers.get("content-type") ?? "";
+  if (TEXTUAL_CONTENT_TYPE.test(contentType) || contentType === "") {
+    return { base64: false, data: await res.text() };
+  }
+  const bytes = Buffer.from(await res.arrayBuffer());
+  return { base64: true, data: bytes.toString("base64") };
 }
 
 /**
@@ -326,15 +378,23 @@ export type ZoneRef = { id: string; name: string; status: string };
 const zoneCache = new Map<string, ZoneRef>(); // keyed by both id and name
 const HEX32 = /^[0-9a-f]{32}$/i;
 
-/** Accepts a zone id, a zone name, or nothing (falls back to CF_ZONE). Returns {id, name, status}. */
-export async function resolveZone(zoneNameOrId?: string): Promise<ZoneRef> {
+/**
+ * Accepts a zone id, a zone name, or nothing (falls back to CF_ZONE). Returns
+ * {id, name, status}. Pass `bypassCache: true` for a genuine live check (used
+ * by cf_verify_token) — without it, a token revoked after the first
+ * successful lookup would keep reporting `ok: true` for the rest of the
+ * process, since every other caller wants the fast cached path.
+ */
+export async function resolveZone(zoneNameOrId?: string, opts?: { bypassCache?: boolean }): Promise<ZoneRef> {
   const target = zoneNameOrId ?? CF_DEFAULT_ZONE;
   if (!target) {
     throw new Error("No zone specified and CF_ZONE is not set as a default.");
   }
 
-  const cached = zoneCache.get(target);
-  if (cached) return cached;
+  if (!opts?.bypassCache) {
+    const cached = zoneCache.get(target);
+    if (cached) return cached;
+  }
 
   const zone = HEX32.test(target)
     ? await cfFetch<ZoneRef>(`/zones/${target}`).then((r) => r.result)
@@ -352,7 +412,16 @@ let accountIdCache: string | undefined;
 
 /** Prefers an explicit id, then CF_ACCOUNT_ID, then the first account the token can see. */
 export async function resolveAccountId(explicit?: string): Promise<string> {
-  if (explicit) return explicit;
+  if (explicit) {
+    // Real Cloudflare account ids are always 32 hex chars. Rejecting anything
+    // else here (rather than passing it through to a URL path) is what closes
+    // off the "account" tool argument as a path-traversal vector — unlike
+    // resolveZone, there's no by-name lookup to fall back to for accounts.
+    if (!HEX32.test(explicit)) {
+      throw new Error(`"${explicit}" doesn't look like a Cloudflare account ID (expected 32 hex characters).`);
+    }
+    return explicit;
+  }
   if (CF_ACCOUNT_ID) return CF_ACCOUNT_ID;
   if (accountIdCache) return accountIdCache;
 
@@ -377,7 +446,7 @@ export async function getPhaseEntrypoint(
 ): Promise<{ id: string; rules: Array<Record<string, unknown>> } | null> {
   try {
     const resp = await cfFetch<{ id: string; rules?: Array<Record<string, unknown>> }>(
-      `/zones/${zoneId}/rulesets/phases/${phase}/entrypoint`
+      `/zones/${zoneId}/rulesets/phases/${seg(phase)}/entrypoint`
     );
     return { id: resp.result.id, rules: resp.result.rules ?? [] };
   } catch (err) {
@@ -388,7 +457,12 @@ export async function getPhaseEntrypoint(
 
 /** Turns a short record name (or "@") into an FQDN using the given zone name. */
 export function toFqdn(name: string | undefined, zoneName: string): string {
-  if (!name || name === "@" || name === zoneName) return zoneName;
-  if (name.endsWith(`.${zoneName}`)) return name;
-  return `${name}.${zoneName}`;
+  // DNS names are case-insensitive and an FQDN may carry a trailing root dot;
+  // normalize both before comparing, or "WWW.example.com" / "www.example.com."
+  // fail to match and get double-suffixed into "www.example.com..example.com".
+  const trimmed = (name ?? "").replace(/\.$/, "");
+  const zone = zoneName.replace(/\.$/, "");
+  if (!trimmed || trimmed.toLowerCase() === "@" || trimmed.toLowerCase() === zone.toLowerCase()) return zone;
+  if (trimmed.toLowerCase().endsWith(`.${zone.toLowerCase()}`)) return trimmed;
+  return `${trimmed}.${zone}`;
 }

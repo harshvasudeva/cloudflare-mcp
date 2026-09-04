@@ -1,9 +1,7 @@
 import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { cfFetch, resolveZone, getPhaseEntrypoint } from "../cloudflare.js";
-import { textResult, requireConfirm, compact, jsonObject } from "../util.js";
-
-const zoneParam = z.string().optional().describe("Zone name or ID; defaults to CF_ZONE.");
+import { cfFetch, resolveZone, getPhaseEntrypoint, seg } from "../cloudflare.js";
+import { textResult, requireConfirm, compact, jsonObject, zoneParam } from "../util.js";
 
 const PHASE_DOC =
   "Ruleset phase. Common values: http_request_firewall_custom (custom WAF rules), http_ratelimit (rate limiting), " +
@@ -37,7 +35,7 @@ export function registerFirewallTools(server: McpServer): void {
     },
     async ({ zone, ruleset_id }) => {
       const z_ = await resolveZone(zone);
-      const resp = await cfFetch(`/zones/${z_.id}/rulesets/${ruleset_id}`);
+      const resp = await cfFetch(`/zones/${z_.id}/rulesets/${seg(ruleset_id)}`);
       return textResult(resp.result);
     }
   );
@@ -79,7 +77,7 @@ export function registerFirewallTools(server: McpServer): void {
     async ({ zone, phase, rules, confirm }) => {
       requireConfirm(confirm, `replace all rules in phase "${phase}"`);
       const z_ = await resolveZone(zone);
-      const resp = await cfFetch(`/zones/${z_.id}/rulesets/phases/${phase}/entrypoint`, {
+      const resp = await cfFetch(`/zones/${z_.id}/rulesets/phases/${seg(phase)}/entrypoint`, {
         method: "PUT",
         body: { rules },
       });
@@ -111,7 +109,7 @@ export function registerFirewallTools(server: McpServer): void {
     async ({ zone, ruleset_id, expression, action, description, action_parameters, enabled, confirm }) => {
       requireConfirm(confirm, `add a "${action}" rule to ruleset ${ruleset_id}`);
       const z_ = await resolveZone(zone);
-      const resp = await cfFetch(`/zones/${z_.id}/rulesets/${ruleset_id}/rules`, {
+      const resp = await cfFetch(`/zones/${z_.id}/rulesets/${seg(ruleset_id)}/rules`, {
         method: "POST",
         body: compact({ expression, action, description, action_parameters, enabled }),
       });
@@ -146,7 +144,7 @@ export function registerFirewallTools(server: McpServer): void {
       if (Object.keys(patch).length === 0) throw new Error("Provide at least one field to update.");
 
       const rulesetResp = await cfFetch<{ rules?: Array<Record<string, unknown>> }>(
-        `/zones/${z_.id}/rulesets/${ruleset_id}`
+        `/zones/${z_.id}/rulesets/${seg(ruleset_id)}`
       );
       const existing = rulesetResp.result.rules?.find((r) => r.id === rule_id);
       if (!existing) {
@@ -163,7 +161,7 @@ export function registerFirewallTools(server: McpServer): void {
         enabled: patch.enabled ?? existing.enabled,
       };
 
-      const resp = await cfFetch(`/zones/${z_.id}/rulesets/${ruleset_id}/rules/${rule_id}`, {
+      const resp = await cfFetch(`/zones/${z_.id}/rulesets/${seg(ruleset_id)}/rules/${seg(rule_id)}`, {
         method: "PATCH",
         body: compact(merged),
       });
@@ -186,7 +184,7 @@ export function registerFirewallTools(server: McpServer): void {
     async ({ zone, ruleset_id, rule_id, confirm }) => {
       requireConfirm(confirm, `delete rule ${rule_id}`);
       const z_ = await resolveZone(zone);
-      await cfFetch(`/zones/${z_.id}/rulesets/${ruleset_id}/rules/${rule_id}`, { method: "DELETE" });
+      await cfFetch(`/zones/${z_.id}/rulesets/${seg(ruleset_id)}/rules/${seg(rule_id)}`, { method: "DELETE" });
       return textResult({ zone: z_.name, deletedRule: rule_id });
     }
   );
@@ -256,7 +254,7 @@ export function registerFirewallTools(server: McpServer): void {
     async ({ zone, rule_id, confirm }) => {
       requireConfirm(confirm, `delete IP access rule ${rule_id}`);
       const z_ = await resolveZone(zone);
-      await cfFetch(`/zones/${z_.id}/firewall/access_rules/rules/${rule_id}`, { method: "DELETE" });
+      await cfFetch(`/zones/${z_.id}/firewall/access_rules/rules/${seg(rule_id)}`, { method: "DELETE" });
       return textResult({ zone: z_.name, deletedRule: rule_id });
     }
   );
