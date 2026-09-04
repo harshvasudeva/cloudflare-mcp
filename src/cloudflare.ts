@@ -126,6 +126,10 @@ const KNOWN_ERROR_GUIDANCE: Record<number, string> = {
     "The legacy Zone Analytics dashboard categorically rejects account-owned API tokens — no permission grant " +
     "fixes this on this token. Use cf_graphql_query or cf_dns_analytics instead; both return the same data and " +
     "work fine with this token type.",
+  10405:
+    "Downloading Worker source categorically rejects account-owned API tokens — no permission grant fixes this " +
+    "on this token (confirmed: every other Worker tool works fine on it). There is currently no alternative " +
+    "endpoint; keep your own copy of what you deploy via cf_deploy_worker rather than relying on reading it back.",
 };
 
 function buildError(path: string, status: number, errors?: Array<{ code: number; message: string }>): CloudflareApiError {

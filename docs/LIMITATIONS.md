@@ -1,6 +1,6 @@
 # Known limitations
 
-Cloudflare-side restrictions that **no token permission change can fix**. All three were
+Cloudflare-side restrictions that **no token permission change can fix**. All four were
 confirmed live against an account-owned token holding every relevant permission group.
 
 `cf_check_permissions` reports these under `blocked_needs_manual_action`, and any direct
@@ -70,11 +70,30 @@ The legacy `/analytics/dashboard` endpoint is also Enterprise-gated on many plan
 
 ---
 
+## Downloading Worker source rejects account-owned tokens
+
+**Affects:** `cf_get_worker_code`.
+
+**Error:**
+```
+[10405] Method not allowed for this authentication scheme
+```
+
+**Fix:** none currently — this is the same account-owned-token restriction pattern as
+Page Rules and legacy Analytics, but with no alternative endpoint. Every other Worker
+tool (deploy, settings, secrets, schedules, versions, deployments, routes, domains)
+works fine on this token type; only reading back the already-deployed source is blocked.
+If you need the source, keep a copy of what you deployed via `cf_deploy_worker` rather
+than relying on `cf_get_worker_code` to retrieve it later. A user-owned token (My
+Profile → API Tokens) should work here too, by the same logic as the Page Rules fix.
+
+---
+
 ## Summary
 
-**119 of 124 tools** work end-to-end on an account-owned token with correctly scoped
-permissions. The 5 that don't are listed above — and each has a working replacement
-already included in the 119.
+**118 of 124 tools** work end-to-end on an account-owned token with correctly scoped
+permissions. The 6 that don't are listed above — 5 have a working replacement already
+included in the 118; `cf_get_worker_code` currently has none.
 
 | Blocked tool | Use instead |
 |---|---|
@@ -83,3 +102,4 @@ already included in the 119.
 | `cf_update_page_rule` | `cf_delete_redirect` + `cf_create_redirect` |
 | `cf_delete_page_rule` | `cf_delete_redirect` |
 | `cf_zone_analytics` | `cf_graphql_query` or `cf_dns_analytics` |
+| `cf_get_worker_code` | none — keep your own copy of deployed source |

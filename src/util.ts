@@ -34,11 +34,6 @@ export function textResult(value: unknown) {
   return { content: [{ type: "text" as const, text: JSON.stringify(value) }] };
 }
 
-/** Wraps an already-formatted string as an MCP text result. */
-export function rawResult(text: string) {
-  return { content: [{ type: "text" as const, text }] };
-}
-
 /**
  * Safety gate for destructive / live-affecting operations. Every tool that
  * deletes something, or overwrites production state (deploys, cache purges),

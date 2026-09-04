@@ -39,7 +39,20 @@ a stronger guarantee than a runtime check alone.
 `cf_retry_pages_deployment`, `cf_add_pages_domain`, `cf_add_dns_record`,
 `cf_create_page_rule`, `cf_update_page_rule`, and `cf_create_redirect`.
 
+**Local filesystem writes:** `cf_get_r2_object` requires `confirm` only when `save_to`
+is set — a plain inline read stays ungated, but streaming an R2 object to an arbitrary
+local path is a write with real disk consequences and gets the same treatment as any
+other write.
+
 Read/list/get tools and the short-lived Worker log-tail session are ungated.
+
+A regression test (`test/confirm-gating.test.mjs`) spawns the built server and checks,
+for every tool whose description promises `confirm=true`, that the schema actually
+requires it — this is the exact class of bug that's easy to introduce silently in a
+124-tool codebase (a copy-pasted tool that forgets one field). Three tools are
+documented exceptions where `confirm` is conditionally required by runtime logic
+instead of the schema (`cf_d1_query`, `cf_get_r2_object`, `cf_queue_ack`) — the test
+tracks them by name so a typo'd exception doesn't silently mask a real gap.
 
 ## D1 SQL gating
 
@@ -62,6 +75,54 @@ sending. Cloudflare's rule-update endpoint **replaces** the whole rule rather th
 merging — per their docs, *"You must include all the rule fields that you want to be part
 of the new rule definition, even if you are not changing their values."* Sending a bare
 `{enabled: false}` would otherwise be rejected or wipe the rule's other fields.
+
+## Path segment encoding
+
+Every tool argument that lands in a request *path* (worker names, bucket names,
+ruleset/rule ids, project names, zone settings ids, ...) goes through `seg()` in
+`cloudflare.ts` before interpolation. Without it, `new URL()` normalizes `../`
+sequences in the finished path — a tool argument like `name: "../../../user/tokens"`
+silently rewrote `/accounts/X/workers/scripts/{name}` into `/accounts/user/tokens`,
+and a value like `"foo?per_page=999"` injected extra query parameters. Confirmed by
+direct `new URL()` construction (see `test/path-traversal.test.mjs`), not theoretical —
+this matters more than usual here because tool arguments are chosen by an LLM that may
+be acting on untrusted content (a webpage, a document, a poisoned prompt), not typed by
+a human who'd notice something was off.
+
+Values that are already known-safe are exempt: Cloudflare-issued ids matched against a
+strict hex/uuid pattern by `resolveZone`/`resolveAccountId`/`makeNameResolver`, and
+values that go through `URLSearchParams` (query params encode automatically). R2 object
+keys are exempt for a different reason — they go through the AWS S3 SDK's structured
+`Bucket`/`Key` parameters, never raw string concatenation, so the SDK handles encoding
+per the S3 spec.
+
+`resolveAccountId`'s explicit `account` argument gets the same treatment via validation
+rather than encoding: a real Cloudflare account id is always 32 hex characters, so
+anything else is rejected outright rather than passed through to a path.
+
+## Local file access (R2 upload/download)
+
+`cf_put_r2_object`'s `file_path` and `cf_get_r2_object`'s `save_to` read and write
+whatever local path they're given — that's the tool's actual job (uploading/downloading
+files a user names), so it isn't sandboxed to a fixed directory, which would break
+legitimate use ("upload D:\backups\report.pdf"). The mitigations that exist instead:
+
+- Both require `confirm: true` (download only when `save_to` is actually set — a plain
+  inline read stays ungated).
+- Both tool descriptions explicitly warn against passing a path suggested by untrusted
+  content.
+
+Treat these two exactly like you'd treat "read/write an arbitrary file" in any other
+tool: fine when the human is asking for it, dangerous if an agent derives the path from
+content it doesn't control.
+
+## Credential redaction
+
+Logpush jobs echo `destination_conf` back verbatim from Cloudflare's API — for `r2://`,
+`s3://`, or an HTTP destination with query-string auth, that string embeds a live access
+key id, secret, or bearer token. `cf_list_logpush_jobs` and `cf_create_logpush_job` both
+redact it before it enters the conversation, so a credential you configured once doesn't
+resurface every time you list your jobs.
 
 ## Credentials
 
